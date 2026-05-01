@@ -20,9 +20,20 @@ import {
   Sparkles,
   Activity,
   Layers,
-  ChevronRight
+  ChevronRight,
+  Save,
+  RefreshCw,
+  Trash2,
+  Hash,
+  LogOut
 } from 'lucide-react';
+
 import { motion, AnimatePresence } from 'framer-motion';
+import Pusher from 'pusher-js';
+import Landing from './components/Landing';
+import Login from './components/Login';
+
+
 
 // --- AnimatedLogo Component ---
 const AnimatedLogo = ({ size = "normal" }) => {
@@ -30,26 +41,26 @@ const AnimatedLogo = ({ size = "normal" }) => {
 
   return (
     <div className={`relative flex items-center justify-center ${containerSize} rounded-[10px] shadow-[0_0_20px_rgba(110,86,207,0.3)] overflow-hidden border border-railway-accent/30`}>
-      {/* Pulsing inner glow behind logo */}
       <motion.div 
         animate={{ scale: [1, 1.2, 1], opacity: [0.3, 0.6, 0.3] }}
         transition={{ duration: 4, repeat: Infinity, ease: "easeInOut" }}
         className="absolute inset-0 bg-railway-accent/20 rounded-full blur-md"
       />
-
-      {/* Actual Logo Image */}
       <motion.img 
         src="/logo.png" 
         alt="OpsMind Logo"
         animate={{ scale: [1, 1.05, 1] }}
         transition={{ duration: 6, repeat: Infinity, ease: "easeInOut" }}
-        className="relative z-10 w-full h-full object-cover scale-110" // scale-110 to hide minor image borders
+        className="relative z-10 w-full h-full object-cover scale-110"
       />
     </div>
   );
 };
 
 const App = () => {
+  const [showLanding, setShowLanding] = useState(true);
+  const [isLoggedIn, setIsLoggedIn] = useState(false);
+
   const [currentView, setCurrentView] = useState('landing');
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState('');
@@ -59,10 +70,98 @@ const App = () => {
   
   const [isDragging, setIsDragging] = useState(false);
   const [uploadedFiles, setUploadedFiles] = useState([]);
+  const [indexedDocs, setIndexedDocs] = useState([]);
+  const [modelChoice, setModelChoice] = useState('groq');
+  const [notifications, setNotifications] = useState([]);
 
   const scrollToBottom = () => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
   };
+
+  useEffect(() => {
+    const token = localStorage.getItem('opsmind_token');
+    if (token) {
+      setIsLoggedIn(true);
+    }
+
+    // --- Pusher Real-time Activity ---
+    const pusher = new Pusher(import.meta.env.VITE_PUSHER_KEY, {
+      cluster: import.meta.env.VITE_PUSHER_CLUSTER
+    });
+
+    const channel = pusher.subscribe('opsmind-activity');
+    channel.bind('new-query', (data) => {
+      const newNotif = { id: Date.now(), message: data.query };
+      setNotifications(prev => [newNotif, ...prev].slice(0, 3));
+      setTimeout(() => {
+        setNotifications(prev => prev.filter(n => n.id !== newNotif.id));
+      }, 5000);
+    });
+
+    return () => {
+      pusher.unsubscribe('opsmind-activity');
+    };
+  }, []);
+
+
+  const [systemPrompt, setSystemPrompt] = useState('');
+
+  const fetchPrompt = async () => {
+    try {
+      const res = await fetch('/api/query/prompt');
+      const data = await res.json();
+      if (data.prompt) setSystemPrompt(data.prompt);
+    } catch (err) {
+      console.error('Failed to fetch prompt:', err);
+    }
+  };
+
+  const updatePrompt = async () => {
+    try {
+      const res = await fetch('/api/query/prompt', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompt: systemPrompt })
+      });
+      if (res.ok) {
+        setNotifications(prev => [{ id: Date.now(), message: "System prompt updated successfully" }, ...prev]);
+      }
+    } catch (err) {
+      console.error('Update prompt failed:', err);
+    }
+  };
+
+  const fetchDocs = async () => {
+    try {
+      const res = await fetch('/api/upload/docs');
+      const data = await res.json();
+      if (Array.isArray(data)) setIndexedDocs(data);
+    } catch (err) {
+      console.error('Failed to fetch docs:', err);
+    }
+  };
+
+  const deleteDoc = async (source) => {
+    if (!confirm(`Are you sure you want to delete "${source}"? This will remove all associated chunks.`)) return;
+    try {
+      const res = await fetch(`/api/upload/docs/${encodeURIComponent(source)}`, { method: 'DELETE' });
+      if (res.ok) {
+        setIndexedDocs(prev => prev.filter(d => d.name !== source));
+        setNotifications(prev => [{ id: Date.now(), message: `Successfully deleted ${source}` }, ...prev]);
+      }
+    } catch (err) {
+      console.error('Delete failed:', err);
+    }
+  };
+
+  useEffect(() => {
+    if (isLoggedIn) {
+      fetchPrompt();
+      fetchDocs();
+    }
+  }, [isLoggedIn]);
+
+
 
   useEffect(() => {
     if (currentView === 'chat') {
@@ -70,92 +169,155 @@ const App = () => {
     }
   }, [messages, isTyping, currentView]);
 
+  const handleLogin = (token) => {
+    setIsLoggedIn(true);
+    setCurrentView('chat');
+  };
+
+  const handleLogout = () => {
+    localStorage.removeItem('opsmind_token');
+    setIsLoggedIn(false);
+    setCurrentView('landing');
+    setMessages([]);
+    setHasInteracted(false);
+  };
+
   const handleSend = async (e, directQuery = null) => {
     if (e) e.preventDefault();
-    const query = directQuery || input;
-    if (!query.trim()) return;
+    const query = (directQuery || input).trim();
+    if (!query || isTyping) return;
 
-    if (currentView === 'landing') {
+    if (!isLoggedIn) {
+      setCurrentView('auth');
+      return;
+    }
+
+    if (currentView === 'landing' || currentView === 'admin') {
       setCurrentView('chat');
     }
 
     setHasInteracted(true);
-    const userMessage = { id: Date.now(), role: 'user', content: query };
+    const userMessage = { id: Date.now(), role: 'user', content: query, time: new Date().toLocaleTimeString() };
     setMessages(prev => [...prev, userMessage]);
     setInput('');
     setIsTyping(true);
 
     const assistantMessageId = Date.now() + 1;
-    setMessages(prev => [...prev, { id: assistantMessageId, role: 'assistant', content: '', sources: [] }]);
+    setMessages(prev => [...prev, { id: assistantMessageId, role: 'assistant', content: '', sources: [], isStreaming: true }]);
 
     try {
-      const simulatedResponse = "Based on the Standard Operating Procedures within the knowledge base, I found that your query is directly addressed in our core workflows. In the **Refund Policy (Section 3.2)**, it specifies that all requests must be processed within 24 hours of initiation. Furthermore, if the request involves international transactions, an additional compliance check is automatically triggered via the OpsMind secure gateway.";
-      const simulatedSources = [
-        { title: 'Refund_Policy_2026.pdf', page: 12, text: '...requests must be processed within 24 hours...' },
-        { title: 'Compliance_Guidelines.pdf', page: 4, text: '...international transactions trigger a secondary review...' }
-      ];
-      
-      let currentText = '';
-      const tokens = simulatedResponse.split(' ');
-      
-      for (let i = 0; i < tokens.length; i++) {
-        await new Promise(resolve => setTimeout(resolve, 30));
-        currentText += (i === 0 ? '' : ' ') + tokens[i];
+      const token = localStorage.getItem('opsmind_token');
+      const response = await fetch('/api/query', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify({ query, topK: 5, modelChoice }),
+      });
+
+
+      if (!response.ok) {
+        throw new Error(`Server error: ${response.status}`);
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let accumulated = '';
+      let sources = [];
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        const chunk = decoder.decode(value, { stream: true });
+        const lines = chunk.split('\n');
         
-        setMessages(prev => prev.map(msg => {
-          if (msg.id === assistantMessageId) {
-            return {
-              ...msg,
-              content: currentText,
-              sources: i === tokens.length - 1 ? simulatedSources : []
-            };
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            const dataStr = line.slice(6).trim();
+            if (!dataStr) continue;
+            
+            try {
+              const parsed = JSON.parse(dataStr);
+              if (parsed.type === 'chunk') {
+                accumulated += parsed.content;
+                setMessages(prev => prev.map(msg => 
+                  msg.id === assistantMessageId ? { ...msg, content: accumulated } : msg
+                ));
+              } else if (parsed.type === 'sources') {
+                sources = parsed.content;
+              } else if (parsed.type === 'done') {
+                setMessages(prev => prev.map(msg => 
+                  msg.id === assistantMessageId ? { ...msg, sources, isStreaming: false } : msg
+                ));
+              } else if (parsed.type === 'error') {
+                throw new Error(parsed.content);
+              }
+            } catch (err) {
+              console.error("Error parsing SSE data:", err);
+            }
           }
-          return msg;
-        }));
+        }
       }
     } catch (error) {
-      console.error("Streaming error:", error);
+      console.error("Query error:", error);
+      setMessages(prev => prev.map(msg => 
+        msg.id === assistantMessageId ? { ...msg, content: `⚠️ Error: ${error.message}`, isStreaming: false } : msg
+      ));
     } finally {
       setIsTyping(false);
     }
   };
 
-  const onDragOver = useCallback((e) => {
-    e.preventDefault();
-    setIsDragging(true);
-  }, []);
+  const handleFileUpload = async (e) => {
+    const files = Array.from(e.target.files || e.dataTransfer.files).filter(f => f.type === 'application/pdf');
+    if (files.length === 0) return;
 
-  const onDragLeave = useCallback((e) => {
-    e.preventDefault();
-    setIsDragging(false);
-  }, []);
+    const newFiles = files.map(f => ({ 
+      file: f, 
+      name: f.name, 
+      size: (f.size / 1024 / 1024).toFixed(2) + ' MB', 
+      status: 'ready' 
+    }));
+    setUploadedFiles(prev => [...prev, ...newFiles]);
+  };
 
-  const onDrop = useCallback((e) => {
-    e.preventDefault();
-    setIsDragging(false);
-    const files = Array.from(e.dataTransfer.files).filter(f => f.type === 'application/pdf');
-    if (files.length > 0) {
-      setUploadedFiles(prev => [...prev, ...files.map(f => ({ name: f.name, size: (f.size / 1024 / 1024).toFixed(2) + ' MB', status: 'ready' }))]);
-    }
-  }, []);
-
-  const handleFileUpload = (e) => {
-    const files = Array.from(e.target.files).filter(f => f.type === 'application/pdf');
-    if (files.length > 0) {
-      setUploadedFiles(prev => [...prev, ...files.map(f => ({ name: f.name, size: (f.size / 1024 / 1024).toFixed(2) + ' MB', status: 'ready' }))]);
+  const processFiles = async () => {
+    if (uploadedFiles.length === 0) return;
+    
+    const token = localStorage.getItem('opsmind_token');
+    
+    for (let i = 0; i < uploadedFiles.length; i++) {
+      if (uploadedFiles[i].status !== 'ready') continue;
+      
+      const fileData = uploadedFiles[i];
+      setUploadedFiles(prev => prev.map((f, idx) => idx === i ? { ...f, status: 'processing' } : f));
+      
+      const formData = new FormData();
+      formData.append('pdf', fileData.file);
+      
+      try {
+        const res = await fetch('/api/upload', {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${token}` },
+          body: formData
+        });
+        
+        if (!res.ok) throw new Error('Upload failed');
+        const data = await res.json();
+        
+        setUploadedFiles(prev => prev.map((f, idx) => idx === i ? { ...f, status: 'indexed' } : f));
+        setIndexedDocs(prev => [...prev, { name: data.filename, pages: data.pages, chunks: data.chunks }]);
+      } catch (err) {
+        console.error("Upload error:", err);
+        setUploadedFiles(prev => prev.map((f, idx) => idx === i ? { ...f, status: 'error' } : f));
+      }
     }
   };
 
   const removeFile = (idx) => {
     setUploadedFiles(prev => prev.filter((_, i) => i !== idx));
-  };
-
-  const processFiles = () => {
-    if (uploadedFiles.length === 0) return;
-    setUploadedFiles(prev => prev.map(f => ({ ...f, status: 'processing' })));
-    setTimeout(() => {
-      setUploadedFiles(prev => prev.map(f => ({ ...f, status: 'indexed' })));
-    }, 2500);
   };
 
   const startNewSession = () => {
@@ -184,14 +346,15 @@ const App = () => {
     { title: "Analyze Expense Reports", desc: "What are the limits on travel meals?", icon: Database },
   ];
 
-  // ==========================================
-  // RENDER
-  // ==========================================
+  if (currentView === 'auth') {
+    return <Login onLogin={handleLogin} />;
+  }
+
   return (
     <div className="relative h-screen w-full bg-[#0B0A10] text-white font-sans overflow-hidden selection:bg-railway-accent selection:text-white">
       <AnimatePresence mode="wait">
         
-        {/* LANDING PAGE VIEW */}
+        {/* 3D LANDING PAGE VIEW */}
         {currentView === 'landing' && (
           <motion.div 
             key="landing"
@@ -200,168 +363,19 @@ const App = () => {
             exit="out"
             variants={pageVariants}
             transition={pageTransition}
-            className="absolute inset-0 flex flex-col overflow-x-hidden overflow-y-auto custom-scrollbar"
+            className="absolute inset-0 flex flex-col overflow-hidden"
           >
-            {/* Dynamic Background */}
-            <div className="fixed inset-0 z-0 overflow-hidden pointer-events-none">
-              <motion.div 
-                initial={{ scale: 1.05, opacity: 0 }}
-                animate={{ 
-                  scale: 1.1, 
-                  opacity: 0.25,
-                  x: [0, -30, 0],
-                  y: [0, -30, 0]
-                }}
-                transition={{ 
-                  scale: { duration: 2.5, ease: "easeOut" },
-                  opacity: { duration: 2.5, ease: "easeOut" },
-                  x: { duration: 60, repeat: Infinity, ease: "linear" },
-                  y: { duration: 65, repeat: Infinity, ease: "linear" }
-                }}
-                className="absolute -inset-10 bg-cover bg-center bg-no-repeat mix-blend-screen"
-                style={{ backgroundImage: `url('https://plus.unsplash.com/premium_photo-1682756540097-6a887bbcf9b0?q=80&w=3871&auto=format&fit=crop')` }}
-              />
-              <motion.div 
-                animate={{ x: [0, 150, -50, 0], y: [0, 100, -100, 0], scale: [1, 1.2, 0.8, 1] }}
-                transition={{ duration: 35, repeat: Infinity, ease: "easeInOut" }}
-                className="absolute top-[-10%] left-[-10%] w-[50%] h-[50%] rounded-full bg-railway-accent/20 blur-[120px]" 
-              />
-              <motion.div 
-                animate={{ x: [0, -150, 100, 0], y: [0, -100, 100, 0], scale: [1, 0.8, 1.2, 1] }}
-                transition={{ duration: 40, repeat: Infinity, ease: "easeInOut" }}
-                className="absolute bottom-[-10%] right-[-10%] w-[40%] h-[60%] rounded-full bg-indigo-500/10 blur-[150px]" 
-              />
-              <div className="absolute inset-0 bg-gradient-to-b from-[#0B0A10]/40 via-[#0B0A10]/80 to-[#0B0A10]"></div>
-              <motion.div 
-                animate={{ backgroundPosition: ['0px 0px', '48px 48px'] }}
-                transition={{ duration: 8, repeat: Infinity, ease: "linear" }}
-                className="absolute inset-0 bg-[linear-gradient(to_right,#80808012_1px,transparent_1px),linear-gradient(to_bottom,#80808012_1px,transparent_1px)] bg-[size:24px_24px]"
-              ></motion.div>
-            </div>
-
-            {/* Top Nav */}
-            <nav className="relative z-20 w-full px-6 py-6 md:px-12 flex items-center justify-between shrink-0">
-              <motion.div 
-                initial={{ opacity: 0, x: -20 }}
-                animate={{ opacity: 1, x: 0 }}
-                transition={{ duration: 1.5, ease: "easeOut" }}
-                className="flex items-center gap-4 cursor-pointer"
-              >
-                <AnimatedLogo />
-                <h1 className="text-2xl font-serif tracking-tight font-semibold">OpsMind</h1>
-              </motion.div>
-              <motion.div 
-                initial={{ opacity: 0, x: 20 }}
-                animate={{ opacity: 1, x: 0 }}
-                transition={{ duration: 1.5, ease: "easeOut", delay: 0.2 }}
-                className="flex items-center gap-6"
-              >
-                <button 
-                  onClick={() => setCurrentView('admin')}
-                  className="text-sm font-medium text-gray-400 hover:text-white transition-colors hidden md:block"
-                >
-                  Admin Dashboard
-                </button>
-                <motion.button 
-                  whileHover={{ scale: 1.05 }}
-                  whileTap={{ scale: 0.95 }}
-                  onClick={() => setCurrentView('chat')}
-                  className="relative px-6 py-2.5 rounded-lg text-sm font-medium transition-all group overflow-hidden shadow-lg shadow-railway-accent/20"
-                >
-                  <div className="absolute inset-0 bg-white/10 border border-white/20 backdrop-blur-md rounded-lg"></div>
-                  <div className="absolute inset-0 bg-gradient-to-r from-railway-accent/40 to-indigo-500/40 opacity-0 group-hover:opacity-100 transition-opacity duration-500"></div>
-                  <span className="relative z-10 flex items-center gap-2 text-white/90 group-hover:text-white">
-                    Launch App <ArrowRight size={14} className="group-hover:translate-x-1 transition-transform duration-500" />
-                  </span>
-                </motion.button>
-              </motion.div>
-            </nav>
-
-            {/* Hero Section */}
-            <main className="relative z-10 flex-1 flex flex-col items-center justify-center px-6 text-center w-full max-w-5xl mx-auto py-12 md:py-16 shrink-0">
-              <motion.div 
-                initial={{ opacity: 0, y: 40 }}
-                animate={{ opacity: 1, y: 0 }}
-                transition={{ duration: 1.8, ease: "easeOut", delay: 0.3 }}
-                className="flex flex-col items-center w-full"
-              >
-                <motion.div 
-                  whileHover={{ scale: 1.05 }}
-                  className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full border border-railway-accent/30 bg-railway-accent/10 backdrop-blur-md text-xs font-mono text-railway-accent uppercase tracking-widest mb-8 cursor-default shadow-[0_0_15px_rgba(110,86,207,0.3)]"
-                >
-                  <Sparkles size={12} className="animate-pulse" style={{ animationDuration: '3s' }} />
-                  Gemini 1.5 Powered RAG Engine
-                </motion.div>
-                
-                <h2 className="text-4xl md:text-5xl lg:text-7xl font-serif leading-tight tracking-tight mb-6 text-white drop-shadow-2xl font-bold max-w-4xl mx-auto">
-                  Corporate Intelligence,
-                  <span className="text-transparent bg-clip-text bg-gradient-to-r from-indigo-300 via-railway-accent to-purple-400 block mt-2 drop-shadow-lg">
-                    Instantly Accessible.
-                  </span>
-                </h2>
-                
-                <p className="text-lg md:text-xl text-gray-400 max-w-2xl mb-12 leading-relaxed font-light">
-                  OpsMind AI ingests your Standard Operating Procedures and turns them into a context-aware, verifiable knowledge engine. Zero hallucinations. Full transparency.
-                </p>
-
-                {/* Premium Search Bar */}
-                <motion.form 
-                  whileTap={{ scale: 0.995 }}
-                  onSubmit={(e) => handleSend(e, input)}
-                  className="w-full max-w-3xl relative flex items-center bg-[#13111C]/60 backdrop-blur-2xl p-2 rounded-2xl border border-white/10 shadow-[0_8px_32px_rgba(0,0,0,0.5)] focus-within:border-railway-accent/50 focus-within:bg-[#13111C]/80 focus-within:shadow-[0_0_40px_rgba(110,86,207,0.3)] transition-all duration-700 group"
-                >
-                  <div className="absolute inset-0 rounded-2xl bg-gradient-to-r from-railway-accent/20 to-transparent opacity-0 group-focus-within:opacity-100 transition-opacity duration-700 pointer-events-none"></div>
-                  <div className="pl-6 pr-4 relative z-10">
-                    <Search className="text-gray-400 group-focus-within:text-railway-accent transition-colors duration-500" size={22} />
-                  </div>
-                  <input 
-                    type="text" 
-                    value={input}
-                    onChange={(e) => setInput(e.target.value)}
-                    placeholder="Ask about compliance, HR policies, or IT procedures..." 
-                    className="flex-1 min-w-0 bg-transparent border-none outline-none py-5 text-lg placeholder:text-gray-500 font-sans text-white relative z-10"
-                  />
-                  <motion.button 
-                    whileHover={{ scale: 1.02 }}
-                    whileTap={{ scale: 0.95 }}
-                    type="submit"
-                    disabled={!input.trim()}
-                    className="px-8 py-4 mr-1 bg-white text-[#0B0A10] hover:bg-gray-100 disabled:opacity-50 disabled:hover:bg-white rounded-xl transition-colors duration-500 font-semibold flex items-center gap-2 shadow-lg relative z-10"
-                  >
-                    Ask <ArrowRight size={18} />
-                  </motion.button>
-                </motion.form>
-              </motion.div>
-
-              {/* Features Grid */}
-              <motion.div 
-                initial={{ opacity: 0, y: 50 }}
-                animate={{ opacity: 1, y: 0 }}
-                transition={{ duration: 1.8, delay: 0.8, ease: "easeOut" }}
-                className="grid grid-cols-1 md:grid-cols-3 gap-6 w-full mt-24 text-left relative z-10 pb-12"
-              >
-                {[
-                  { icon: Database, title: "Vector Search", desc: "Powered by MongoDB Atlas Vector Search for semantic similarity matching against thousands of PDF chunks in milliseconds." },
-                  { icon: Lock, title: "Verifiable Citations", desc: "Every response is strictly grounded in uploaded company data, providing exact page numbers and snippet citations." },
-                  { icon: Zap, title: "Real-time Streaming", desc: "Utilizing Server-Sent Events (SSE) to stream Gemini 1.5 Flash tokens directly to the interface for instantaneous feedback." }
-                ].map((feature, i) => (
-                  <motion.div 
-                    key={i}
-                    whileHover={{ y: -5, scale: 1.02 }}
-                    transition={{ duration: 0.4 }}
-                    className="relative p-8 rounded-2xl border border-white/10 bg-white/[0.02] backdrop-blur-xl hover:bg-white/[0.04] transition-all duration-500 overflow-hidden group shadow-[0_4px_20px_rgba(0,0,0,0.3)]"
-                  >
-                    <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-railway-accent to-indigo-500 opacity-0 group-hover:opacity-100 transition-opacity duration-500"></div>
-                    <div className="absolute -inset-24 bg-railway-accent/10 blur-3xl rounded-full opacity-0 group-hover:opacity-100 transition-opacity duration-700 pointer-events-none"></div>
-                    <feature.icon className="text-railway-accent mb-5 relative z-10" size={32} />
-                    <h3 className="text-xl font-serif mb-3 text-white relative z-10 font-medium">{feature.title}</h3>
-                    <p className="text-sm text-gray-400 leading-relaxed relative z-10">{feature.desc}</p>
-                  </motion.div>
-                ))}
-              </motion.div>
-            </main>
+            <Landing onEnter={() => {
+              if (isLoggedIn) {
+                setCurrentView('chat');
+              } else {
+                setCurrentView('auth');
+              }
+            }} />
           </motion.div>
         )}
+
+
 
         {/* CHAT AND ADMIN VIEWS */}
         {currentView !== 'landing' && (
@@ -398,11 +412,18 @@ const App = () => {
               </div>
 
               <div className="flex-1 overflow-y-auto px-4 space-y-1 custom-scrollbar">
-                <div className="text-[10px] font-bold text-gray-500 uppercase tracking-widest mb-3 px-2 mt-4">Recent Sessions</div>
-                {[1, 2, 3].map(i => (
+                <div className="text-[10px] font-bold text-gray-500 uppercase tracking-widest mb-3 px-2 mt-4">Active Sessions</div>
+                {messages.length > 0 && (
+                  <button className="w-full flex items-center gap-3 px-3 py-2.5 rounded-md bg-railway-accent/10 border border-railway-accent/20 text-sm text-white group">
+                    <MessageSquare size={14} className="text-railway-accent" />
+                    <span className="truncate">Current Analysis</span>
+                  </button>
+                )}
+                <div className="text-[10px] font-bold text-gray-500 uppercase tracking-widest mb-3 px-2 mt-4">History</div>
+                {[1, 2].map(i => (
                   <button key={i} className="w-full flex items-center gap-3 px-3 py-2.5 rounded-md hover:bg-white/5 transition-colors duration-300 text-sm text-gray-400 hover:text-white group">
                     <MessageSquare size={14} className="opacity-50 group-hover:opacity-100 group-hover:text-railway-accent transition-colors" />
-                    <span className="truncate">SOP Analysis #{i}</span>
+                    <span className="truncate">Previous Session #{i}</span>
                   </button>
                 ))}
               </div>
@@ -414,8 +435,11 @@ const App = () => {
                 >
                   <ShieldCheck size={16} className={currentView === 'admin' ? 'opacity-100' : 'opacity-50 group-hover:opacity-100'} /> Knowledge Base
                 </button>
-                <button className="w-full flex items-center gap-3 px-3 py-2.5 rounded-md hover:bg-white/5 transition-colors duration-300 text-sm text-gray-400 hover:text-white group">
-                  <Settings size={16} className="opacity-50 group-hover:opacity-100" /> Settings
+                <button 
+                  onClick={handleLogout}
+                  className="w-full flex items-center gap-3 px-3 py-2.5 rounded-md hover:bg-red-500/10 transition-colors duration-300 text-sm text-gray-400 hover:text-red-400 group"
+                >
+                  <LogOut size={16} className="opacity-50 group-hover:opacity-100" /> Sign Out
                 </button>
               </div>
             </aside>
@@ -427,7 +451,7 @@ const App = () => {
               <header className="h-16 flex items-center justify-between px-6 lg:px-8 z-10 border-b border-white/10 bg-[#0B0A10]/60 backdrop-blur-xl">
                 <div className="flex items-center gap-4">
                   <div className="px-3 py-1 rounded-md border border-railway-accent/30 bg-railway-accent/10 text-[10px] font-mono text-railway-accent uppercase tracking-widest hidden sm:block">
-                    {currentView === 'chat' ? 'Engine: Gemini 1.5 RAG' : 'Admin: Ingestion Pipeline'}
+                    {currentView === 'chat' ? 'Engine: Gemini Pro RAG' : 'Admin: Ingestion Pipeline'}
                   </div>
                   <div className="h-4 w-px bg-white/10 hidden sm:block"></div>
                   <div className="text-xs text-gray-400 flex items-center gap-2 font-mono">
@@ -435,16 +459,52 @@ const App = () => {
                       <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
                       <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
                     </span>
-                    System Online
+                    Live Engine: {modelChoice.toUpperCase()}
                   </div>
                 </div>
-                <div className="flex items-center gap-3">
+                <div className="flex items-center gap-4">
+                  {/* Model Switcher */}
+                  <div className="flex bg-[#13111C] border border-white/10 rounded-lg p-0.5">
+                    <button 
+                      onClick={() => setModelChoice('groq')}
+                      className={`px-3 py-1 text-[10px] font-bold rounded-md transition-all ${modelChoice === 'groq' ? 'bg-railway-accent text-white shadow-lg' : 'text-gray-500 hover:text-gray-300'}`}
+                    >
+                      GROQ
+                    </button>
+                    <button 
+                      onClick={() => setModelChoice('gemini')}
+                      className={`px-3 py-1 text-[10px] font-bold rounded-md transition-all ${modelChoice === 'gemini' ? 'bg-railway-accent text-white shadow-lg' : 'text-gray-500 hover:text-gray-300'}`}
+                    >
+                      GEMINI
+                    </button>
+                  </div>
                   <div className="flex items-center gap-2 text-xs text-gray-500 font-mono px-3 py-1.5 rounded-md bg-[#13111C] border border-white/10">
                     <Database size={12} className="text-railway-accent" />
-                    <span>Vectors: 14,024</span>
+                    <span>Vectors: {indexedDocs.reduce((acc, d) => acc + d.chunks, 14024).toLocaleString()}</span>
                   </div>
                 </div>
               </header>
+
+              {/* Real-time Toast Notifications */}
+              <div className="fixed top-20 right-6 z-50 flex flex-col gap-2">
+                <AnimatePresence>
+                  {notifications.map(notif => (
+                    <motion.div 
+                      key={notif.id}
+                      initial={{ opacity: 0, x: 50, scale: 0.9 }}
+                      animate={{ opacity: 1, x: 0, scale: 1 }}
+                      exit={{ opacity: 0, x: 20, scale: 0.9 }}
+                      className="bg-[#13111C]/90 backdrop-blur-xl border border-railway-accent/30 px-4 py-3 rounded-xl shadow-2xl flex items-center gap-3 max-w-xs"
+                    >
+                      <div className="w-2 h-2 rounded-full bg-railway-accent animate-pulse"></div>
+                      <div className="text-[11px] text-gray-300 font-mono">
+                        <span className="text-railway-accent font-bold">New Activity:</span> {notif.message}
+                      </div>
+                    </motion.div>
+                  ))}
+                </AnimatePresence>
+              </div>
+
 
               {currentView === 'chat' ? (
                 <div className="flex-1 flex overflow-hidden relative z-10">
@@ -510,10 +570,7 @@ const App = () => {
                                     ? 'bg-railway-accent/20 border-railway-accent/30 text-white rounded-tr-sm' 
                                     : 'bg-[#13111C]/80 border-white/10 text-white/90 backdrop-blur-sm'
                                 }`}>
-                                  {msg.role === 'assistant' && (
-                                    <span className="font-serif text-[16px] md:text-lg leading-relaxed whitespace-pre-wrap">{msg.content}</span>
-                                  )}
-                                  {msg.role === 'user' && msg.content}
+                                  <span className="font-serif text-[16px] md:text-lg leading-relaxed whitespace-pre-wrap">{msg.content}</span>
                                 </div>
                                 
                                 {msg.sources?.length > 0 && (
@@ -534,7 +591,7 @@ const App = () => {
                                         className="flex items-center gap-2 px-3 py-1.5 rounded-md bg-white/5 border border-white/10 text-xs text-gray-400 hover:border-railway-accent/50 hover:bg-railway-accent/10 hover:text-railway-accent transition-all cursor-pointer group shadow-sm"
                                       >
                                         <FileText size={12} className="group-hover:text-railway-accent" />
-                                        <span className="font-mono">{s.title} <span className="opacity-50">p.{s.page}</span></span>
+                                        <span className="font-mono">{s.filename || s.title} <span className="opacity-50">p.{s.page}</span></span>
                                         <ExternalLink size={10} className="opacity-0 group-hover:opacity-100 transition-opacity" />
                                       </motion.div>
                                     ))}
@@ -594,6 +651,7 @@ const App = () => {
                             onChange={(e) => setInput(e.target.value)}
                             placeholder="Ask about corporate policies, procedures..." 
                             className="w-full bg-transparent border-none outline-none px-4 py-3.5 text-[15px] placeholder:text-gray-500 font-sans text-white"
+                            disabled={isTyping}
                           />
                           <motion.button 
                             whileHover={{ scale: 1.05 }}
@@ -622,7 +680,7 @@ const App = () => {
                         <div className="p-4 rounded-xl border border-white/10 bg-white/5 space-y-3">
                           <div className="flex justify-between items-center">
                             <span className="text-sm text-gray-400">LLM</span>
-                            <span className="text-sm font-medium text-white">Gemini 1.5 Pro</span>
+                            <span className="text-sm font-medium text-white">Gemini Pro</span>
                           </div>
                           <div className="flex justify-between items-center">
                             <span className="text-sm text-gray-400">Embeddings</span>
@@ -630,7 +688,7 @@ const App = () => {
                           </div>
                           <div className="flex justify-between items-center">
                             <span className="text-sm text-gray-400">Response</span>
-                            <span className="text-sm font-medium text-emerald-400 flex items-center gap-1"><Zap size={12}/> Streaming</span>
+                            <span className="text-sm font-medium text-emerald-400 flex items-center gap-1"><Zap size={12}/> SSE Streaming</span>
                           </div>
                         </div>
                       </div>
@@ -638,15 +696,19 @@ const App = () => {
                       <div>
                         <div className="text-[10px] font-bold text-gray-500 uppercase tracking-widest mb-3">Indexed Documents</div>
                         <div className="space-y-2">
-                          {["HR_Handbook_2026.pdf", "IT_Security_Protocol.pdf", "Expense_Policy.pdf"].map((doc, idx) => (
+                          {indexedDocs.length > 0 ? indexedDocs.map((doc, idx) => (
                             <div key={idx} className="flex items-center justify-between p-3 rounded-lg border border-white/5 bg-white/5 hover:border-railway-accent/30 transition-colors cursor-pointer group">
                               <div className="flex items-center gap-2 overflow-hidden">
                                 <FileText size={14} className="text-gray-400 group-hover:text-railway-accent flex-shrink-0" />
-                                <span className="text-xs text-gray-300 truncate font-mono">{doc}</span>
+                                <span className="text-xs text-gray-300 truncate font-mono">{doc.name}</span>
                               </div>
                               <ChevronRight size={14} className="text-gray-500 opacity-0 group-hover:opacity-100 transition-opacity" />
                             </div>
-                          ))}
+                          )) : (
+                            <div className="text-xs text-gray-500 italic p-4 text-center border border-dashed border-white/10 rounded-lg">
+                              No documents indexed yet.
+                            </div>
+                          )}
                         </div>
                         <button onClick={() => setCurrentView('admin')} className="mt-3 text-xs text-railway-accent hover:text-white transition-colors flex items-center gap-1">
                           Manage knowledge base <ArrowRight size={10} />
@@ -670,9 +732,9 @@ const App = () => {
 
                     <motion.div 
                       whileHover={{ scale: 1.01 }}
-                      onDragOver={onDragOver}
-                      onDragLeave={onDragLeave}
-                      onDrop={onDrop}
+                      onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }}
+                      onDragLeave={(e) => { e.preventDefault(); setIsDragging(false); }}
+                      onDrop={(e) => { e.preventDefault(); setIsDragging(false); handleFileUpload(e); }}
                       className={`relative border-2 border-dashed rounded-2xl p-10 md:p-16 text-center transition-all duration-500 bg-[#13111C]/50 backdrop-blur-sm ${isDragging ? 'border-railway-accent bg-railway-accent/10 shadow-[0_0_40px_rgba(110,86,207,0.3)]' : 'border-white/10 hover:border-railway-accent/50 hover:bg-[#13111C]/80'}`}
                     >
                       <input 
@@ -742,6 +804,7 @@ const App = () => {
                                   </span>
                                 )}
                                 {file.status === 'indexed' && <span className="text-[10px] sm:text-xs font-mono text-emerald-400 bg-emerald-400/10 px-2.5 py-1.5 rounded border border-emerald-400/20 whitespace-nowrap">Indexed</span>}
+                                {file.status === 'error' && <span className="text-[10px] sm:text-xs font-mono text-red-400 bg-red-400/10 px-2.5 py-1.5 rounded border border-red-400/20 whitespace-nowrap">Error</span>}
                                 
                                 {file.status === 'ready' && (
                                   <button onClick={() => removeFile(idx)} className="text-gray-500 hover:text-red-400 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-all p-2 rounded hover:bg-white/5">
@@ -754,7 +817,98 @@ const App = () => {
                         </ul>
                       </motion.div>
                     )}
+
+                    <div className="space-y-6 mt-16 pt-10 border-t border-white/10">
+                      <div className="space-y-1">
+                        <h3 className="text-xl font-serif text-white font-medium flex items-center gap-2">
+                          <Cpu size={20} className="text-railway-accent" /> System Persona Editor
+                        </h3>
+                        <p className="text-gray-400 text-xs">Define how the AI behaves, its personality, and strict adherence rules for SOP documents.</p>
+                      </div>
+                      
+                      <div className="bg-[#13111C]/50 border border-white/10 rounded-2xl p-6 space-y-4">
+                        <textarea 
+                          value={systemPrompt}
+                          onChange={(e) => setSystemPrompt(e.target.value)}
+                          rows={8}
+                          className="w-full bg-white/5 border border-white/10 rounded-xl p-4 text-sm text-gray-300 font-mono focus:border-railway-accent/50 outline-none transition-all custom-scrollbar"
+                          placeholder="Enter system prompt instructions..."
+                        />
+                        <div className="flex justify-end">
+                          <motion.button 
+                            whileHover={{ scale: 1.02 }}
+                            whileTap={{ scale: 0.98 }}
+                            onClick={updatePrompt}
+                            className="px-6 py-2.5 bg-railway-accent text-white rounded-xl text-sm font-medium shadow-lg shadow-railway-accent/20 flex items-center gap-2"
+                          >
+                            <Save size={16} /> Save Changes
+                          </motion.button>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="space-y-6 mt-16 pt-10 border-t border-white/10">
+
+                      <div className="flex items-center justify-between">
+                        <div className="space-y-1">
+                          <h3 className="text-xl font-serif text-white font-medium">Manage Knowledge Base</h3>
+                          <p className="text-gray-400 text-xs">View and remove previously indexed Standard Operating Procedures.</p>
+                        </div>
+                        <button 
+                          onClick={fetchDocs}
+                          className="p-2 text-gray-400 hover:text-white hover:bg-white/5 rounded-lg transition-colors"
+                          title="Refresh Document List"
+                        >
+                          <RefreshCw size={16} />
+                        </button>
+                      </div>
+
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <AnimatePresence>
+                          {indexedDocs.length > 0 ? indexedDocs.map((doc, idx) => (
+                            <motion.div 
+                              key={doc.name}
+                              initial={{ opacity: 0, scale: 0.95 }}
+                              animate={{ opacity: 1, scale: 1 }}
+                              exit={{ opacity: 0, scale: 0.95 }}
+                              className="group relative bg-[#13111C]/50 border border-white/10 p-5 rounded-2xl hover:border-railway-accent/40 transition-all duration-300"
+                            >
+                              <div className="flex items-start justify-between">
+                                <div className="flex items-center gap-3">
+                                  <div className="p-2.5 bg-white/5 rounded-xl border border-white/10 group-hover:border-railway-accent/30 transition-colors">
+                                    <FileText size={20} className="text-railway-accent" />
+                                  </div>
+                                  <div>
+                                    <h4 className="text-sm font-medium text-white truncate max-w-[180px] font-mono">{doc.name}</h4>
+                                    <div className="flex items-center gap-3 mt-1">
+                                      <span className="text-[10px] text-gray-500 flex items-center gap-1 font-mono">
+                                        <Database size={10} /> {doc.chunks} chunks
+                                      </span>
+                                      <span className="text-[10px] text-gray-500 flex items-center gap-1 font-mono">
+                                        <Hash size={10} /> ~{doc.pages} pages
+                                      </span>
+                                    </div>
+                                  </div>
+                                </div>
+                                <button 
+                                  onClick={() => deleteDoc(doc.name)}
+                                  className="p-2 text-gray-500 hover:text-red-400 hover:bg-red-500/10 rounded-lg transition-all opacity-0 group-hover:opacity-100"
+                                  title="Delete Document"
+                                >
+                                  <Trash2 size={16} />
+                                </button>
+                              </div>
+                            </motion.div>
+                          )) : (
+                            <div className="col-span-2 py-10 text-center border border-dashed border-white/10 rounded-2xl bg-white/5">
+                              <p className="text-sm text-gray-500 italic">No documents currently indexed in the knowledge base.</p>
+                            </div>
+                          )}
+                        </AnimatePresence>
+                      </div>
+                    </div>
                   </motion.div>
+
                 </div>
               )}
             </main>
@@ -782,3 +936,4 @@ const App = () => {
 };
 
 export default App;
+
